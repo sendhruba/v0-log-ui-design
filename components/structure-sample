@@ -1,0 +1,169 @@
+import { 
+  Component, 
+  Input, 
+  Output, 
+  EventEmitter, 
+  OnChanges, 
+  SimpleChanges, 
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  OnDestroy,
+  OnInit
+} from '@angular/core';
+import { Subject, Subscription } from 'rxjs';
+import { debounceTime, distinctUntilChanged } from 'rxjs/operators';
+
+export interface TreeNodeData {
+  key: string;
+  value: any;
+  path: string;
+}
+
+@Component({
+  selector: 'app-structured-view',
+  templateUrl: './structured-view.component.html',
+  styleUrls: ['./structured-view.component.css'],
+  changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class StructuredViewComponent implements OnInit, OnChanges, OnDestroy {
+  @Input() data: any;
+  @Input() searchTerm: string = '';
+  @Input() currentResultIndex: number = -1;
+  @Input() filterMode: 'filter' | 'highlight' = 'highlight';
+  @Output() searchResultsChange = new EventEmitter<string[]>();
+
+  debouncedSearchTerm: string = '';
+  matchOrder: string[] = [];
+  matchedPaths: Set<string> = new Set();
+  rootEntries: TreeNodeData[] = [];
+  isSearching: boolean = false;
+
+  private searchSubject = new Subject<string>();
+  private subscription: Subscription;
+
+  constructor(private cdr: ChangeDetectorRef) {
+    this.subscription = this.searchSubject.pipe(
+      debounceTime(300),
+      distinctUntilChanged()
+    ).subscribe(term => {
+      this.debouncedSearchTerm = term;
+      this.updateMatches();
+      this.cdr.detectChanges();
+    });
+  }
+
+  // <CHANGE> Initialize data on component init for instant render
+  ngOnInit(): void {
+    this.rootEntries = this.getRootEntries();
+    this.cdr.detectChanges();
+  }
+
+  ngOnChanges(changes: SimpleChanges): void {
+    if (changes['data']) {
+      this.updateMatches();
+    }
+    
+    if (changes['searchTerm']) {
+      this.isSearching = true;
+      this.searchSubject.next(this.searchTerm);
+      this.cdr.detectChanges();
+    }
+
+    if (changes['filterMode'] && !changes['searchTerm'] && !changes['data']) {
+      this.rootEntries = this.getRootEntries();
+      this.cdr.detectChanges();
+    }
+  }
+
+  ngOnDestroy(): void {
+    this.subscription.unsubscribe();
+    this.searchSubject.complete();
+  }
+
+  private updateMatches(): void {
+    this.matchOrder = this.collectMatchingPathsInOrder(this.data, this.debouncedSearchTerm);
+    this.matchedPaths = new Set(this.matchOrder);
+    this.searchResultsChange.emit(this.matchOrder);
+    this.rootEntries = this.getRootEntries();
+    this.isSearching = false;
+  }
+
+  private collectMatchingPathsInOrder(data: any, searchTerm: string): string[] {
+    const matchedPaths: string[] = [];
+    if (!searchTerm) return matchedPaths;
+
+    const searchLower = searchTerm.toLowerCase();
+
+    const traverse = (obj: any, currentPath: string) => {
+      if (obj === null || typeof obj !== 'object') {
+        return;
+      }
+
+      if (Array.isArray(obj)) {
+        obj.forEach((item, index) => {
+          const itemPath = currentPath ? `${currentPath}.${index}` : `${index}`;
+          const keyMatches = `[${index}]`.toLowerCase().includes(searchLower);
+          const isExpandable = item !== null && typeof item === 'object';
+          const valueMatches = !isExpandable && String(item).toLowerCase().includes(searchLower);
+
+          if (keyMatches || valueMatches) {
+            matchedPaths.push(itemPath);
+          }
+
+          traverse(item, itemPath);
+        });
+      } else {
+        Object.entries(obj).forEach(([key, value]) => {
+          const valuePath = currentPath ? `${currentPath}.${key}` : key;
+          const keyMatches = key.toLowerCase().includes(searchLower);
+          const isExpandable = value !== null && typeof value === 'object';
+          const valueMatches = !isExpandable && String(value).toLowerCase().includes(searchLower);
+
+          if (keyMatches || valueMatches) {
+            matchedPaths.push(valuePath);
+          }
+
+          traverse(value, valuePath);
+        });
+      }
+    };
+
+    traverse(data, '');
+    return matchedPaths;
+  }
+
+  private shouldShowNode(path: string): boolean {
+    if (!this.debouncedSearchTerm) return true;
+    if (this.matchedPaths.has(path)) return true;
+
+    for (const matchedPath of this.matchedPaths) {
+      if (matchedPath.startsWith(path + '.')) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private getRootEntries(): TreeNodeData[] {
+    if (this.filterMode === 'highlight' || !this.debouncedSearchTerm) {
+      return Object.entries(this.data).map(([key, value]) => ({
+        key,
+        value,
+        path: key
+      }));
+    }
+
+    return Object.entries(this.data)
+      .filter(([key]) => this.shouldShowNode(key))
+      .map(([key, value]) => ({
+        key,
+        value,
+        path: key
+      }));
+  }
+
+  trackByPath(index: number, item: TreeNodeData): string {
+    return item.path;
+  }
+}
