@@ -1,0 +1,48 @@
+/* <CHANGE> Ensure button state changes are instant with hardware acceleration */
+.toggle-btn {
+  transition: all 0.15s ease-in-out;
+  will-change: background-color, color, border-color;
+  transform: translateZ(0); /* Hardware acceleration */
+}
+
+.toggle-btn.active {
+  background-color: var(--color-primary, #3b82f6);
+  color: var(--color-white, #ffffff);
+  border-color: var(--color-primary, #3b82f6);
+}
+
+.toggle-btn:disabled {
+  pointer-events: none;
+}
+
+/* <CHANGE> View loading state during switching */
+.view-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 400px;
+  gap: 1rem;
+  color: var(--color-gray-600, #6b7280);
+  font-size: 0.875rem;
+}
+
+.view-loading .spinner {
+  height: 2rem;
+  width: 2rem;
+  animation: spin 1s linear infinite;
+}
+
+.spinner-track {
+  opacity: 0.25;
+}
+
+.spinner-fill {
+  opacity: 0.75;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
