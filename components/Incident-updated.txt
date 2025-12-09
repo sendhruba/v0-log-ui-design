@@ -1,0 +1,129 @@
+import { Component, ChangeDetectorRef } from '@angular/core';
+
+@Component({
+  selector: 'app-incident-investigator',
+  templateUrl: './incident-investigator.component.html',
+  styleUrls: ['./incident-investigator.component.css']
+})
+export class IncidentInvestigatorComponent {
+  viewMode: 'structured' | 'json' = 'structured';
+  searchTerm: string = '';
+  searchResults: string[] = [];
+  currentResultIndex: number = -1;
+  filterMode: 'filter' | 'highlight' = 'highlight';
+  isViewSwitching: boolean = false; // <CHANGE> Track view switching state
+
+  sampleIncidentData = {
+    incident: {
+      id: "INC-2024-001",
+      timestamp: "2024-12-06T14:23:45Z",
+      severity: "high",
+      status: "investigating",
+      title: "API Gateway Timeout Issues",
+      affectedServices: ["api-gateway", "user-service", "payment-service"],
+      metrics: {
+        errorRate: 0.234,
+        p95Latency: 2456,
+        requestCount: 15234,
+        failedRequests: 3567,
+      },
+      details: {
+        region: "us-east-1",
+        environment: "production",
+        triggeredBy: "automated_monitoring",
+        alerts: [
+          {
+            id: "ALT-001",
+            name: "High Error Rate",
+            threshold: 0.05,
+            actual: 0.234,
+            duration: "15m",
+          },
+          {
+            id: "ALT-002",
+            name: "Latency Spike",
+            threshold: 1000,
+            actual: 2456,
+            duration: "12m",
+          },
+        ],
+      },
+      stackTrace: {
+        error: "Gateway Timeout",
+        message: "Upstream service failed to respond within 30s",
+        cause: {
+          service: "user-service",
+          endpoint: "/api/v1/users/profile",
+          timeout: 30000,
+          attempts: 3,
+          lastAttempt: "2024-12-06T14:23:40Z",
+        },
+      },
+      logs: [
+        {
+          timestamp: "2024-12-06T14:23:30Z",
+          level: "ERROR",
+          message: "Connection timeout to user-service",
+          context: {
+            requestId: "req-abc-123",
+            userId: "user-456",
+            endpoint: "/api/v1/users/profile",
+          },
+        },
+      ],
+    },
+  };
+
+  constructor(private cdr: ChangeDetectorRef) {}
+
+  // <CHANGE> Immediately update button state, defer view rendering
+  setViewMode(mode: 'structured' | 'json'): void {
+    // Immediately update the viewMode for button active state
+    this.viewMode = mode;
+    this.isViewSwitching = true;
+    
+    // Force immediate UI update for button state
+    this.cdr.detectChanges();
+    
+    // Defer the view rendering to next tick
+    setTimeout(() => {
+      this.isViewSwitching = false;
+      this.cdr.detectChanges();
+    }, 0);
+  }
+
+  handleSearch(term: string): void {
+    this.searchTerm = term;
+    if (!term.trim()) {
+      this.searchResults = [];
+      this.currentResultIndex = -1;
+    } else {
+      this.currentResultIndex = -1;
+    }
+  }
+
+  handlePrevious(): void {
+    if (this.searchResults.length === 0) return;
+    this.currentResultIndex = this.currentResultIndex <= 0 
+      ? this.searchResults.length - 1 
+      : this.currentResultIndex - 1;
+  }
+
+  handleNext(): void {
+    if (this.searchResults.length === 0) return;
+    this.currentResultIndex = this.currentResultIndex >= this.searchResults.length - 1 
+      ? 0 
+      : this.currentResultIndex + 1;
+  }
+
+  onSearchResultsChange(results: string[]): void {
+    this.searchResults = results;
+  }
+
+  // <CHANGE> Immediately update button state, defer any side effects
+  setFilterMode(mode: 'filter' | 'highlight'): void {
+    this.filterMode = mode;
+    // Force immediate detection for button state
+    this.cdr.detectChanges();
+  }
+}
