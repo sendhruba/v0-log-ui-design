@@ -1,0 +1,162 @@
+<div class="incident-container">
+  <!-- Header -->
+  <header class="incident-header">
+    <div class="header-content">
+      <div class="header-left">
+        <div class="icon-container">
+          <svg class="alert-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+        </div>
+        <div>
+          <h1 class="header-title">Incident Investigation</h1>
+          <p class="header-subtitle">Analyze and resolve incidents efficiently</p>
+        </div>
+      </div>
+      <div class="header-right">
+        <span class="badge badge-destructive">
+          <span class="pulse-dot"></span>
+          High Severity
+        </span>
+        <span class="badge badge-outline">INC-2024-001</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Controls -->
+  <div class="controls-bar">
+    <div class="controls-content">
+      <!-- View Toggle -->
+      <div class="view-toggle">
+        <button 
+          class="toggle-btn" 
+          [class.active]="viewMode === 'structured'"
+          [disabled]="isViewSwitching"
+          (click)="setViewMode('structured')">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="8" y1="6" x2="21" y2="6"></line>
+            <line x1="8" y1="12" x2="21" y2="12"></line>
+            <line x1="8" y1="18" x2="21" y2="18"></line>
+            <line x1="3" y1="6" x2="3.01" y2="6"></line>
+            <line x1="3" y1="12" x2="3.01" y2="12"></line>
+            <line x1="3" y1="18" x2="3.01" y2="18"></line>
+          </svg>
+          Structured
+        </button>
+        <button 
+          class="toggle-btn" 
+          [class.active]="viewMode === 'json'"
+          [disabled]="isViewSwitching"
+          (click)="setViewMode('json')">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+          </svg>
+          Raw JSON
+        </button>
+      </div>
+
+      <!-- Filter Mode Toggle -->
+      <div class="view-toggle">
+        <button 
+          class="toggle-btn toggle-btn-sm" 
+          [class.active]="filterMode === 'highlight'"
+          (click)="setFilterMode('highlight')"
+          title="Show all data with matches highlighted">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 7h16M4 12h16M4 17h16" />
+          </svg>
+          Highlight
+        </button>
+        <button 
+          class="toggle-btn toggle-btn-sm" 
+          [class.active]="filterMode === 'filter'"
+          (click)="setFilterMode('filter')"
+          title="Show only matching data">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z" />
+          </svg>
+          Filter
+        </button>
+      </div>
+
+      <!-- Search -->
+      <div class="search-container">
+        <div class="search-input-wrapper">
+          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"></circle>
+            <path d="m21 21-4.35-4.35"></path>
+          </svg>
+          <input 
+            type="text" 
+            class="search-input" 
+            placeholder="Search by key or value..."
+            [(ngModel)]="searchTerm"
+            (input)="handleSearch(searchTerm)"
+          />
+          <div class="search-counter" *ngIf="searchResults.length > 0">
+            {{ currentResultIndex + 1 }} / {{ searchResults.length }}
+          </div>
+        </div>
+
+        <!-- Navigation Buttons -->
+        <div class="nav-buttons">
+          <button 
+            class="nav-btn" 
+            (click)="handlePrevious()"
+            [disabled]="searchResults.length === 0"
+            title="Previous match">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="18 15 12 9 6 15"></polyline>
+            </svg>
+          </button>
+          <button 
+            class="nav-btn" 
+            (click)="handleNext()"
+            [disabled]="searchResults.length === 0"
+            title="Next match">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Content Area -->
+  <div class="content-area">
+    <div class="content-card">
+      <!-- <CHANGE> Show loading state during view switch -->
+      <div class="view-loading" *ngIf="isViewSwitching">
+        <svg class="spinner" viewBox="0 0 24 24">
+          <circle class="spinner-track" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none" />
+          <path class="spinner-fill" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+        </svg>
+        <span>Loading view...</span>
+      </div>
+
+      <!-- <CHANGE> Views render in background while switching -->
+      <app-structured-view 
+        *ngIf="viewMode === 'structured' && !isViewSwitching"
+        [data]="sampleIncidentData"
+        [searchTerm]="searchTerm"
+        [currentResultIndex]="currentResultIndex"
+        [filterMode]="filterMode"
+        (searchResultsChange)="onSearchResultsChange($event)">
+      </app-structured-view>
+      
+      <app-json-view 
+        *ngIf="viewMode === 'json' && !isViewSwitching"
+        [data]="sampleIncidentData"
+        [searchTerm]="searchTerm"
+        [currentResultIndex]="currentResultIndex"
+        (searchResultsChange)="onSearchResultsChange($event)">
+      </app-json-view>
+    </div>
+  </div>
+</div>
+
+
