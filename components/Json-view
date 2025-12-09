@@ -1,0 +1,119 @@
+import {
+  Component,
+  Input,
+  Output,
+  EventEmitter,
+  OnChanges,
+  SimpleChanges,
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  OnInit
+} from '@angular/core';
+
+@Component({
+  selector: 'app-json-view',
+  templateUrl: './json-view.component.html',
+  styleUrls: ['./json-view.component.css'],
+  changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class JsonViewComponent implements OnInit, OnChanges {
+  @Input() data: any;
+  @Input() searchTerm: string = '';
+  @Input() currentResultIndex: number = -1;
+  @Output() searchResultsChange = new EventEmitter<string[]>();
+
+  formattedJson: string = '';
+  matches: Array<{ line: number; column: number; length: number }> = [];
+
+  constructor(private cdr: ChangeDetectorRef) {}
+
+  // <CHANGE> Initialize formatted JSON on init for instant render
+  ngOnInit(): void {
+    this.formattedJson = JSON.stringify(this.data, null, 2);
+    this.updateMatches();
+  }
+
+  ngOnChanges(changes: SimpleChanges): void {
+    if (changes['data']) {
+      this.formattedJson = JSON.stringify(this.data, null, 2);
+      this.updateMatches();
+    }
+
+    if (changes['searchTerm']) {
+      this.updateMatches();
+    }
+  }
+
+  private updateMatches(): void {
+    if (!this.searchTerm) {
+      this.matches = [];
+      this.searchResultsChange.emit([]);
+      this.cdr.detectChanges();
+      return;
+    }
+
+    const matches: Array<{ line: number; column: number; length: number }> = [];
+    const lines = this.formattedJson.split('\n');
+    const searchLower = this.searchTerm.toLowerCase();
+
+    lines.forEach((line, lineIndex) => {
+      const lineLower = line.toLowerCase();
+      let columnIndex = 0;
+
+      while ((columnIndex = lineLower.indexOf(searchLower, columnIndex)) !== -1) {
+        matches.push({
+          line: lineIndex,
+          column: columnIndex,
+          length: this.searchTerm.length
+        });
+        columnIndex += this.searchTerm.length;
+      }
+    });
+
+    this.matches = matches;
+    this.searchResultsChange.emit(matches.map((_, i) => `match-${i}`));
+    this.cdr.detectChanges();
+  }
+
+  getHighlightedJson(): string {
+    if (!this.searchTerm || this.matches.length === 0) {
+      return this.escapeHtml(this.formattedJson);
+    }
+
+    const lines = this.formattedJson.split('\n');
+    const result: string[] = [];
+
+    lines.forEach((line, lineIndex) => {
+      const lineMatches = this.matches.filter(m => m.line === lineIndex);
+
+      if (lineMatches.length === 0) {
+        result.push(this.escapeHtml(line));
+      } else {
+        let highlighted = '';
+        let lastIndex = 0;
+
+        lineMatches.forEach((match, matchIndex) => {
+          const isCurrentMatch = this.matches.indexOf(match) === this.currentResultIndex;
+          
+          highlighted += this.escapeHtml(line.substring(lastIndex, match.column));
+          highlighted += `<mark class="${isCurrentMatch ? 'current-match' : 'highlight'}">`;
+          highlighted += this.escapeHtml(line.substring(match.column, match.column + match.length));
+          highlighted += '</mark>';
+          
+          lastIndex = match.column + match.length;
+        });
+
+        highlighted += this.escapeHtml(line.substring(lastIndex));
+        result.push(highlighted);
+      }
+    });
+
+    return result.join('\n');
+  }
+
+  private escapeHtml(text: string): string {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+}
