@@ -1,0 +1,1211 @@
+import { Component, ViewChild, ElementRef } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+
+interface Difference {
+  path: string;
+  type: 'added' | 'removed' | 'modified';
+  sourceValue?: any;
+  targetValue?: any;
+  depth: number;
+}
+
+@Component({
+  selector: 'app-json-diff-tool',
+  standalone: true,
+  imports: [CommonModule, FormsModule],
+  templateUrl: './json-diff-tool.component.html',
+  styleUrls: ['./json-diff-tool.component.css']
+})
+export class JsonDiffToolComponent {
+  @ViewChild('sourceFileInput') sourceFileInput!: ElementRef<HTMLInputElement>;
+  @ViewChild('targetFileInput') targetFileInput!: ElementRef<HTMLInputElement>;
+
+  sourceJson: string = '';
+  targetJson: string = '';
+  sourceError: string = '';
+  targetError: string = '';
+  currentDiffIndex: number = 0;
+  searchQuery: string = '';
+  expandedPaths: Set<string> = new Set();
+  isDraggingSource: boolean = false;
+  isDraggingTarget: boolean = false;
+
+  differences: Difference[] = [];
+  filteredDifferences: Difference[] = [];
+
+  // Find differences between two JSON objects
+  private findDifferences(source: any, target: any, path: string = '', depth: number = 0): Difference[] {
+    const diffs: Difference[] = [];
+
+    if (source === target) return diffs;
+
+    const sourceType = Array.isArray(source) ? 'array' : typeof source;
+    const targetType = Array.isArray(target) ? 'array' : typeof target;
+
+    if (sourceType !== targetType || sourceType !== 'object') {
+      diffs.push({ path, type: 'modified', sourceValue: source, targetValue: target, depth });
+      return diffs;
+    }
+
+    if (Array.isArray(source) && Array.isArray(target)) {
+      const maxLength = Math.max(source.length, target.length);
+      for (let i = 0; i < maxLength; i++) {
+        const currentPath = `${path}[${i}]`;
+        if (i >= source.length) {
+          diffs.push({ path: currentPath, type: 'added', targetValue: target[i], depth: depth + 1 });
+        } else if (i >= target.length) {
+          diffs.push({ path: currentPath, type: 'removed', sourceValue: source[i], depth: depth + 1 });
+        } else {
+          diffs.push(...this.findDifferences(source[i], target[i], currentPath, depth + 1));
+        }
+      }
+    } else {
+      const allKeys = new Set([...Object.keys(source || {}), ...Object.keys(target || {})]);
+
+      for (const key of allKeys) {
+        const currentPath = path ? `${path}.${key}` : key;
+        const hasSource = key in source;
+        const hasTarget = key in target;
+
+        if (!hasSource && hasTarget) {
+          diffs.push({ path: currentPath, type: 'added', targetValue: target[key], depth: depth + 1 });
+        } else if (hasSource && !hasTarget) {
+          diffs.push({ path: currentPath, type: 'removed', sourceValue: source[key], depth: depth + 1 });
+        } else {
+          diffs.push(...this.findDifferences(source[key], target[key], currentPath, depth + 1));
+        }
+      }
+    }
+
+    return diffs;
+  }
+
+  // Validate and set source JSON
+  validateAndSetSource(value: string): void {
+    this.sourceJson = value;
+    if (!value.trim()) {
+      this.sourceError = '';
+      this.updateDifferences();
+      return;
+    }
+    try {
+      JSON.parse(value);
+      this.sourceError = '';
+      this.updateDifferences();
+    } catch {
+      this.sourceError = 'Invalid JSON format';
+      this.differences = [];
+      this.filteredDifferences = [];
+    }
+  }
+
+  // Validate and set target JSON
+  validateAndSetTarget(value: string): void {
+    this.targetJson = value;
+    if (!value.trim()) {
+      this.targetError = '';
+      this.updateDifferences();
+      return;
+    }
+    try {
+      JSON.parse(value);
+      this.targetError = '';
+      this.updateDifferences();
+    } catch {
+      this.targetError = 'Invalid JSON format';
+      this.differences = [];
+      this.filteredDifferences = [];
+    }
+  }
+
+  // Update differences when JSON changes
+  private updateDifferences(): void {
+    if (!this.sourceJson || !this.targetJson) {
+      this.differences = [];
+      this.filteredDifferences = [];
+      return;
+    }
+
+    try {
+      const source = JSON.parse(this.sourceJson);
+      const target = JSON.parse(this.targetJson);
+      this.differences = this.findDifferences(source, target);
+      this.filterDifferences();
+    } catch {
+      this.differences = [];
+      this.filteredDifferences = [];
+    }
+  }
+
+  // Filter differences based on search query
+  filterDifferences(): void {
+    if (!this.searchQuery.trim()) {
+      this.filteredDifferences = [...this.differences];
+      return;
+    }
+
+    const query = this.searchQuery.toLowerCase();
+    this.filteredDifferences = this.differences.filter(
+      (diff) =>
+        diff.path.toLowerCase().includes(query) ||
+        JSON.stringify(diff.sourceValue).toLowerCase().includes(query) ||
+        JSON.stringify(diff.targetValue).toLowerCase().includes(query)
+    );
+    this.currentDiffIndex = 0;
+  }
+
+  // Load sample data
+  loadSampleData(): void {
+    const sampleSource = JSON.stringify(
+      {
+        user: { id: 1, name: 'John Doe', email: 'john@example.com', role: 'admin' },
+        settings: { theme: 'dark', notifications: true },
+        permissions: ['read', 'write'],
+      },
+      null,
+      2
+    );
+
+    const sampleTarget = JSON.stringify(
+      {
+        user: { id: 1, name: 'John Smith', email: 'john.smith@example.com', status: 'active' },
+        settings: { theme: 'dark', notifications: false },
+        permissions: ['read', 'write', 'delete'],
+      },
+      null,
+      2
+    );
+
+    this.validateAndSetSource(sampleSource);
+    this.validateAndSetTarget(sampleTarget);
+  }
+
+  // Toggle expanded state for a path
+  toggleExpanded(path: string): void {
+    if (this.expandedPaths.has(path)) {
+      this.expandedPaths.delete(path);
+    } else {
+      this.expandedPaths.add(path);
+    }
+  }
+
+  // Check if path is expanded
+  isExpanded(path: string): boolean {
+    return this.expandedPaths.has(path);
+  }
+
+  // Format value for display
+  formatValue(value: any, expanded: boolean): string {
+    if (value === null) return 'null';
+    if (value === undefined) return 'undefined';
+    if (typeof value === 'string') return `"${value}"`;
+    if (typeof value === 'object') {
+      const str = JSON.stringify(value, null, 2);
+      if (!expanded && str.length > 100) {
+        return JSON.stringify(value).slice(0, 100) + '...';
+      }
+      return str;
+    }
+    return String(value);
+  }
+
+  // Check if value is complex (object or array)
+  isComplexValue(value: any): boolean {
+    return typeof value === 'object' && value !== null;
+  }
+
+  // Read JSON file
+  private readJsonFile(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e: any) => {
+        const content = e.target.result as string;
+        resolve(content);
+      };
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsText(file);
+    });
+  }
+
+  // Handle source file selection
+  async handleSourceFileSelect(file: File): Promise<void> {
+    if (!file.name.endsWith('.json')) {
+      this.sourceError = 'Please select a JSON file';
+      return;
+    }
+    try {
+      const content = await this.readJsonFile(file);
+      this.validateAndSetSource(content);
+    } catch (error) {
+      this.sourceError = 'Failed to read file';
+    }
+  }
+
+  // Handle target file selection
+  async handleTargetFileSelect(file: File): Promise<void> {
+    if (!file.name.endsWith('.json')) {
+      this.targetError = 'Please select a JSON file';
+      return;
+    }
+    try {
+      const content = await this.readJsonFile(file);
+      this.validateAndSetTarget(content);
+    } catch (error) {
+      this.targetError = 'Failed to read file';
+    }
+  }
+
+  // Source drag and drop handlers
+  onSourceDrop(event: DragEvent): void {
+    event.preventDefault();
+    this.isDraggingSource = false;
+    const file = event.dataTransfer?.files[0];
+    if (file) this.handleSourceFileSelect(file);
+  }
+
+  onSourceDragOver(event: DragEvent): void {
+    event.preventDefault();
+    this.isDraggingSource = true;
+  }
+
+  onSourceDragLeave(): void {
+    this.isDraggingSource = false;
+  }
+
+  // Target drag and drop handlers
+  onTargetDrop(event: DragEvent): void {
+    event.preventDefault();
+    this.isDraggingTarget = false;
+    const file = event.dataTransfer?.files[0];
+    if (file) this.handleTargetFileSelect(file);
+  }
+
+  onTargetDragOver(event: DragEvent): void {
+    event.preventDefault();
+    this.isDraggingTarget = true;
+  }
+
+  onTargetDragLeave(): void {
+    this.isDraggingTarget = false;
+  }
+
+  // File input handlers
+  onSourceFileInputChange(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (file) this.handleSourceFileSelect(file);
+  }
+
+  onTargetFileInputChange(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (file) this.handleTargetFileSelect(file);
+  }
+
+  // Browse file buttons
+  browseSourceFile(): void {
+    this.sourceFileInput.nativeElement.click();
+  }
+
+  browseTargetFile(): void {
+    this.targetFileInput.nativeElement.click();
+  }
+
+  // Navigation
+  previousDiff(): void {
+    if (this.currentDiffIndex > 0) {
+      this.currentDiffIndex--;
+    }
+  }
+
+  nextDiff(): void {
+    if (this.currentDiffIndex < this.filteredDifferences.length - 1) {
+      this.currentDiffIndex++;
+    }
+  }
+
+  selectDiff(index: number): void {
+    this.currentDiffIndex = index;
+  }
+
+  // Get counts for each type
+  getAddedCount(): number {
+    return this.differences.filter(d => d.type === 'added').length;
+  }
+
+  getRemovedCount(): number {
+    return this.differences.filter(d => d.type === 'removed').length;
+  }
+
+  getModifiedCount(): number {
+    return this.differences.filter(d => d.type === 'modified').length;
+  }
+
+  // Check if no differences
+  hasNoDifferences(): boolean {
+    return this.differences.length === 0 && 
+           this.sourceJson && 
+           this.targetJson && 
+           !this.sourceError && 
+           !this.targetError;
+  }
+}
+
+/* Colors - Matching the React theme */
+:root {
+  --background: #ffffff;
+  --foreground: #0a0a0a;
+  --card: #ffffff;
+  --card-foreground: #0a0a0a;
+  --muted: #f5f5f5;
+  --muted-foreground: #737373;
+  --border: #e5e5e5;
+  --input: #e5e5e5;
+  --primary: #171717;
+  --accent: #f5f5f5;
+  --destructive: #ef4444;
+  --added: #22c55e;
+  --removed: #ef4444;
+  --modified: #f59e0b;
+}
+
+.dark {
+  --background: #0a0a0a;
+  --foreground: #fafafa;
+  --card: #0a0a0a;
+  --card-foreground: #fafafa;
+  --muted: #262626;
+  --muted-foreground: #a3a3a3;
+  --border: #262626;
+  --input: #262626;
+  --primary: #fafafa;
+  --accent: #262626;
+  --added: #16a34a;
+  --removed: #dc2626;
+  --modified: #d97706;
+}
+
+/* Container */
+.json-diff-container {
+  padding: 24px;
+  max-width: 1400px;
+  margin: 0 auto;
+  color: var(--foreground);
+  background: var(--background);
+}
+
+/* Header */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.title {
+  font-size: 24px;
+  font-weight: 600;
+  margin: 0 0 4px 0;
+  letter-spacing: -0.025em;
+}
+
+.subtitle {
+  font-size: 14px;
+  color: var(--muted-foreground);
+  margin: 0;
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: transparent;
+  color: var(--foreground);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-outline {
+  border-color: var(--border);
+}
+
+.btn-outline:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.btn-ghost {
+  border: none;
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.btn-sm {
+  padding: 4px 12px;
+  font-size: 12px;
+  height: 32px;
+}
+
+.btn-xs {
+  padding: 2px;
+  height: 24px;
+  width: 24px;
+}
+
+/* Icons */
+.icon {
+  width: 16px;
+  height: 16px;
+  color: var(--muted-foreground);
+}
+
+.icon-sm {
+  width: 14px;
+  height: 14px;
+}
+
+.icon-lg {
+  width: 32px;
+  height: 32px;
+}
+
+/* Input Grid */
+.input-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+@media (min-width: 1024px) {
+  .input-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Card */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.card-title {
+  font-size: 14px;
+  font-weight: 500;
+  margin: 0;
+}
+
+/* Error Message */
+.error-message {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--destructive);
+  font-size: 12px;
+}
+
+/* Drop Zone */
+.drop-zone {
+  position: relative;
+  border-radius: 8px;
+  border: 2px dashed transparent;
+  transition: all 0.2s;
+}
+
+.drop-zone.dragging {
+  border-color: var(--primary);
+  background: var(--accent);
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(245, 245, 245, 0.8);
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+.dark .drop-overlay {
+  background: rgba(38, 38, 38, 0.8);
+}
+
+.drop-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.drop-content span {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* Textarea */
+.textarea {
+  width: 100%;
+  height: 400px;
+  padding: 12px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  resize: none;
+  outline: none;
+}
+
+.textarea:focus {
+  border-color: var(--primary);
+}
+
+.textarea.error {
+  border-color: var(--destructive);
+}
+
+.textarea::placeholder {
+  color: var(--muted-foreground);
+}
+
+/* File Input */
+.file-input {
+  display: none;
+}
+
+/* Stats Card */
+.stats-card {
+  margin-bottom: 16px;
+}
+
+.stats-content {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+
+.stat-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stat-label {
+  font-size: 14px;
+  color: var(--muted-foreground);
+}
+
+.stat-badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stat-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* Badge */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--background);
+  font-family: 'Courier New', monospace;
+}
+
+.badge-added {
+  background: rgba(34, 197, 94, 0.1);
+  color: var(--added);
+  border-color: rgba(34, 197, 94, 0.3);
+}
+
+.badge-removed {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--removed);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.badge-modified {
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--modified);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+/* Search */
+.search-wrapper {
+  position: relative;
+}
+
+.search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+
+.search-input {
+  padding: 8px 12px 8px 32px;
+  width: 200px;
+  height: 36px;
+  font-size: 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  outline: none;
+}
+
+.search-input:focus {
+  border-color: var(--primary);
+}
+
+.search-input::placeholder {
+  color: var(--muted-foreground);
+}
+
+/* Navigation Controls */
+.nav-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.nav-text {
+  margin-left: 8px;
+  font-size: 14px;
+  color: var(--muted-foreground);
+}
+
+/* Differences */
+.differences-title {
+  font-size: 16px;
+  font-weight: 500;
+  margin: 0 0 16px 0;
+}
+
+.differences-list {
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.no-results {
+  padding: 64px;
+  text-align: center;
+  color: var(--muted-foreground);
+}
+
+/* Diff Item */
+.diff-item {
+  padding: 16px;
+  margin-bottom: 12px;
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.diff-item:hover {
+  border-color: var(--muted-foreground);
+}
+
+.diff-item.active {
+  border-color: var(--primary);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+.diff-item.diff-added {
+  background: rgba(34, 197, 94, 0.05);
+  border-color: rgba(34, 197, 94, 0.2);
+}
+
+.diff-item.diff-removed {
+  background: rgba(239, 68, 68, 0.05);
+  border-color: rgba(239, 68, 68, 0.2);
+}
+
+.diff-item.diff-modified {
+  background: rgba(245, 158, 11, 0.05);
+  border-color: rgba(245, 158, 11, 0.2);
+}
+
+.diff-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.diff-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.path-code {
+  font-family: 'Courier New', monospace;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.diff-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+}
+
+/* Value Container */
+.value-container {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.value-badge {
+  flex-shrink: 0;
+  margin-top: 2px;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid;
+}
+
+.value-pre {
+  flex: 1;
+  padding: 12px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  border-radius: 6px;
+  border: 2px solid;
+  overflow-x: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.value-removed {
+  background: rgba(239, 68, 68, 0.05);
+  border-color: rgba(239, 68, 68, 0.2);
+}
+
+.value-added {
+  background: rgba(34, 197, 94, 0.05);
+  border-color: rgba(34, 197, 94, 0.2);
+}
+
+.value-added-strong {
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.3);
+}
+
+.value-removed-strong {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+/* Diff Note */
+.diff-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.note-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.note-added {
+  background: var(--added);
+}
+
+.note-removed {
+  background: var(--removed);
+}
+
+.note-modified {
+  background: var(--modified);
+}
+
+/* No Differences */
+.no-diff-card {
+  padding: 48px;
+}
+
+.no-diff-content {
+  text-align: center;
+}
+
+.check-icon {
+  font-size: 48px;
+  margin-bottom: 8px;
+}
+
+.no-diff-title {
+  font-size: 18px;
+  font-weight: 500;
+  margin: 0 0 8px 0;
+}
+
+.no-diff-text {
+  font-size: 14px;
+  color: var(--muted-foreground);
+  margin: 0;
+}
+
+
+<div class="json-diff-container">
+  <!-- Header -->
+  <div class="header">
+    <div>
+      <h1 class="title">JSON Diff Tool</h1>
+      <p class="subtitle">Compare JSON files for incident investigation</p>
+    </div>
+    <button class="btn btn-outline" (click)="loadSampleData()">Load Sample</button>
+  </div>
+
+  <!-- Input Section -->
+  <div class="input-grid">
+    <!-- Source JSON -->
+    <div class="card">
+      <div class="card-header">
+        <div class="header-left">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+          <h3 class="card-title">Source JSON</h3>
+        </div>
+        <div class="header-right">
+          <div *ngIf="sourceError" class="error-message">
+            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            <span>{{ sourceError }}</span>
+          </div>
+          <button class="btn btn-ghost btn-sm" (click)="browseSourceFile()">
+            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <span>Browse</span>
+          </button>
+          <input
+            #sourceFileInput
+            type="file"
+            accept=".json"
+            class="file-input"
+            (change)="onSourceFileInputChange($event)"
+          />
+        </div>
+      </div>
+      <div
+        class="drop-zone"
+        [class.dragging]="isDraggingSource"
+        (drop)="onSourceDrop($event)"
+        (dragover)="onSourceDragOver($event)"
+        (dragleave)="onSourceDragLeave()"
+      >
+        <textarea
+          [(ngModel)]="sourceJson"
+          (ngModelChange)="validateAndSetSource($event)"
+          placeholder="Paste JSON, drag & drop, or browse a .json file..."
+          class="textarea"
+          [class.error]="sourceError"
+        ></textarea>
+        <div *ngIf="isDraggingSource" class="drop-overlay">
+          <div class="drop-content">
+            <svg class="icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <span>Drop JSON file here</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Target JSON -->
+    <div class="card">
+      <div class="card-header">
+        <div class="header-left">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+          <h3 class="card-title">Target JSON</h3>
+        </div>
+        <div class="header-right">
+          <div *ngIf="targetError" class="error-message">
+            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            <span>{{ targetError }}</span>
+          </div>
+          <button class="btn btn-ghost btn-sm" (click)="browseTargetFile()">
+            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <span>Browse</span>
+          </button>
+          <input
+            #targetFileInput
+            type="file"
+            accept=".json"
+            class="file-input"
+            (change)="onTargetFileInputChange($event)"
+          />
+        </div>
+      </div>
+      <div
+        class="drop-zone"
+        [class.dragging]="isDraggingTarget"
+        (drop)="onTargetDrop($event)"
+        (dragover)="onTargetDragOver($event)"
+        (dragleave)="onTargetDragLeave()"
+      >
+        <textarea
+          [(ngModel)]="targetJson"
+          (ngModelChange)="validateAndSetTarget($event)"
+          placeholder="Paste JSON, drag & drop, or browse a .json file..."
+          class="textarea"
+          [class.error]="targetError"
+        ></textarea>
+        <div *ngIf="isDraggingTarget" class="drop-overlay">
+          <div class="drop-content">
+            <svg class="icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <span>Drop JSON file here</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results Section -->
+  <ng-container *ngIf="differences.length > 0">
+    <!-- Stats Bar -->
+    <div class="card stats-card">
+      <div class="stats-content">
+        <div class="stat-item">
+          <span class="stat-label">Total Changes:</span>
+          <span class="badge">{{ differences.length }}</span>
+        </div>
+        <div class="stat-badges">
+          <span class="badge badge-added">+ {{ getAddedCount() }} Added</span>
+          <span class="badge badge-removed">- {{ getRemovedCount() }} Removed</span>
+          <span class="badge badge-modified">≠ {{ getModifiedCount() }} Modified</span>
+        </div>
+        <div class="stat-controls">
+          <div class="search-wrapper">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"/>
+              <path d="m21 21-4.35-4.35"/>
+            </svg>
+            <input
+              type="text"
+              [(ngModel)]="searchQuery"
+              (ngModelChange)="filterDifferences()"
+              placeholder="Search differences..."
+              class="search-input"
+            />
+          </div>
+          <div class="nav-controls">
+            <button
+              class="btn btn-outline btn-sm"
+              (click)="previousDiff()"
+              [disabled]="currentDiffIndex === 0 || filteredDifferences.length === 0"
+            >
+              <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="18 15 12 9 6 15"/>
+              </svg>
+            </button>
+            <button
+              class="btn btn-outline btn-sm"
+              (click)="nextDiff()"
+              [disabled]="currentDiffIndex >= filteredDifferences.length - 1 || filteredDifferences.length === 0"
+            >
+              <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="6 9 12 15 18 9"/>
+              </svg>
+            </button>
+            <span *ngIf="filteredDifferences.length > 0" class="nav-text">
+              {{ currentDiffIndex + 1 }} of {{ filteredDifferences.length }}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Differences List -->
+    <div class="card">
+      <h3 class="differences-title">Differences</h3>
+      <div class="differences-list">
+        <div *ngIf="filteredDifferences.length === 0" class="no-results">
+          No differences found
+        </div>
+        <div
+          *ngFor="let diff of filteredDifferences; let i = index"
+          class="diff-item"
+          [class.diff-added]="diff.type === 'added'"
+          [class.diff-removed]="diff.type === 'removed'"
+          [class.diff-modified]="diff.type === 'modified'"
+          [class.active]="i === currentDiffIndex"
+          (click)="selectDiff(i)"
+        >
+          <div class="diff-header">
+            <div class="diff-header-left">
+              <span
+                class="badge"
+                [class.badge-added]="diff.type === 'added'"
+                [class.badge-removed]="diff.type === 'removed'"
+                [class.badge-modified]="diff.type === 'modified'"
+              >
+                <ng-container *ngIf="diff.type === 'added'">+ Added</ng-container>
+                <ng-container *ngIf="diff.type === 'removed'">- Removed</ng-container>
+                <ng-container *ngIf="diff.type === 'modified'">≠ Modified</ng-container>
+              </span>
+              <code class="path-code">{{ diff.path }}</code>
+            </div>
+            <button
+              *ngIf="isComplexValue(diff.sourceValue) || isComplexValue(diff.targetValue)"
+              class="btn btn-ghost btn-xs"
+              (click)="toggleExpanded(diff.path); $event.stopPropagation()"
+            >
+              <svg *ngIf="isExpanded(diff.path)" class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="6 9 12 15 18 9"/>
+              </svg>
+              <svg *ngIf="!isExpanded(diff.path)" class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="9 18 15 12 9 6"/>
+              </svg>
+            </button>
+          </div>
+
+          <div class="diff-content">
+            <!-- Modified -->
+            <ng-container *ngIf="diff.type === 'modified'">
+              <div class="value-container">
+                <span class="value-badge badge-removed">Source</span>
+                <pre class="value-pre value-removed">{{ formatValue(diff.sourceValue, isExpanded(diff.path)) }}</pre>
+              </div>
+              <div class="value-container">
+                <span class="value-badge badge-added">Target</span>
+                <pre class="value-pre value-added">{{ formatValue(diff.targetValue, isExpanded(diff.path)) }}</pre>
+              </div>
+              <div class="diff-note">
+                <span class="note-dot note-modified"></span>
+                Value changed in Target JSON
+              </div>
+            </ng-container>
+
+            <!-- Added -->
+            <ng-container *ngIf="diff.type === 'added'">
+              <div class="value-container">
+                <span class="value-badge badge-added">Target</span>
+                <pre class="value-pre value-added-strong">{{ formatValue(diff.targetValue, isExpanded(diff.path)) }}</pre>
+              </div>
+              <div class="diff-note">
+                <span class="note-dot note-added"></span>
+                + New field added in Target JSON (not present in Source)
+              </div>
+            </ng-container>
+
+            <!-- Removed -->
+            <ng-container *ngIf="diff.type === 'removed'">
+              <div class="value-container">
+                <span class="value-badge badge-removed">Source</span>
+                <pre class="value-pre value-removed-strong">{{ formatValue(diff.sourceValue, isExpanded(diff.path)) }}</pre>
+              </div>
+              <div class="diff-note">
+                <span class="note-dot note-removed"></span>
+                - Field removed in Target JSON (was present in Source)
+              </div>
+            </ng-container>
+          </div>
+        </div>
+      </div>
+    </div>
+  </ng-container>
+
+  <!-- No Differences Message -->
+  <div *ngIf="hasNoDifferences()" class="card no-diff-card">
+    <div class="no-diff-content">
+      <div class="check-icon">✓</div>
+      <h3 class="no-diff-title">No Differences Found</h3>
+      <p class="no-diff-text">The source and target JSON files are identical.</p>
+    </div>
+  </div>
+</div>
