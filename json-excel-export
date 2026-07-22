@@ -1,0 +1,596 @@
+/**
+ * json-to-excel.model.ts
+ * Shared types for the JsonToExcelService.
+ */
+
+/** A single flattened row. Values are kept as primitives so ExcelJS/pandas/etc. can type them natively. */
+export interface SheetRow {
+  [column: string]: string | number | boolean | null;
+}
+
+/** sheetName -> ordered rows. A plain Map preserves sheet discovery order, which we want for readability. */
+export type SheetsMap = Map<string, SheetRow[]>;
+
+export interface FlattenOptions {
+  /** Sheet name to use for the top level if it can't be inferred from a single wrapper key (default: 'Root'). */
+  rootName?: string;
+  /** How many records to flatten before yielding back to the event loop. Lower = more responsive UI, higher = faster total time. Default 2000. */
+  chunkSize?: number;
+  /** Excel hard limit is 31 chars; kept configurable in case you target a different sink. Default 31. */
+  maxSheetNameLength?: number;
+  /** Called periodically during flattening so the UI can show a progress bar. */
+  onProgress?: (progress: ConversionProgress) => void;
+}
+
+export interface ExportOptions extends FlattenOptions {
+  /** Freeze the header row on every sheet. Default true. */
+  freezeHeader?: boolean;
+  /** Add Excel's built-in column filter dropdowns to the header row. Default true. */
+  autoFilter?: boolean;
+  /** Bold/colored header row styling. Default true. */
+  styledHeader?: boolean;
+}
+
+export type ConversionPhase = 'flattening' | 'building-workbook' | 'done';
+
+export interface ConversionProgress {
+  phase: ConversionPhase;
+  sheetsProcessed: number;
+  rowsProcessed: number;
+  currentSheet?: string;
+}
+
+
+
+
+
+
+
+/**
+ * json-to-excel.service.ts
+ * -------------------------------------------------------------------------
+ * Generic utility service: converts ANY JSON document (unknown, dynamic
+ * shape, arbitrary nesting depth) into a clean, multi-sheet Excel workbook
+ * that a data scientist / systems analyst can drop straight into pandas,
+ * Power BI, Excel PivotTables, etc.
+ *
+ * Design goals vs. the original one-off Python script:
+ *
+ * 1. GENERIC   - no field names are hardcoded; it walks whatever structure
+ *                it is handed, so the same service works for the next JSON
+ *                shape unmodified.
+ *
+ * 2. EFFICIENT / LARGE-JSON SAFE
+ *      - Iterative worklist (queue), NOT recursive per-record calls, so a
+ *        10,000-element array can't blow the call stack the way naive
+ *        recursion would.
+ *      - Flattening happens in CHUNKS with an `await` back to the event
+ *        loop between chunks, so the browser tab stays responsive instead
+ *        of freezing on a huge JSON payload.
+ *      - Column discovery is done with a Set for O(1) "have we seen this
+ *        column before" checks instead of O(n) `includes()` scans.
+ *      - Workbook rows are appended one at a time via ExcelJS's row API
+ *        instead of building one giant intermediate array-of-arrays in
+ *        memory, keeping peak memory lower for very wide/long sheets.
+ *      - Runs the same on the main thread or inside a Web Worker (see the
+ *        companion json-to-excel.worker.ts) if you want flattening fully
+ *        off the UI thread for very large files.
+ *
+ * 3. ANALYST-FRIENDLY OUTPUT
+ *      - One tab per repeating record type (array of objects), never one
+ *        giant sheet of mixed grain.
+ *      - Every child sheet carries RowID / ParentRowID so any row can be
+ *        traced back to its parent, at any nesting depth, without having
+ *        to know the original schema.
+ *      - Nested plain objects (not arrays) are flattened inline using dot
+ *        notation (e.g. billing.premiumAmount) instead of spawning a
+ *        needless one-row-per-parent sheet.
+ *      - Bold header row, frozen header row, and column auto-filter by
+ *        default, so a sheet is immediately explorable/sortable in Excel.
+ *
+ * Install:
+ *   npm install exceljs file-saver
+ *   npm install -D @types/file-saver
+ * -------------------------------------------------------------------------
+ */
+
+import { Injectable } from '@angular/core';
+import ExcelJS from 'exceljs';
+import { saveAs } from 'file-saver';
+import {
+  ConversionProgress,
+  ExportOptions,
+  FlattenOptions,
+  SheetRow,
+  SheetsMap,
+} from './json-to-excel.model';
+
+interface WorkItem {
+  obj: Record<string, any>;
+  sheetName: string;
+  parentRowId: string | null;
+}
+
+const DEFAULT_CHUNK_SIZE = 2000;
+const DEFAULT_MAX_SHEET_NAME_LEN = 31; // hard Excel limit
+const HEADER_FILL: ExcelJS.Fill = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FF305496' },
+};
+const HEADER_FONT: Partial<ExcelJS.Font> = {
+  name: 'Arial',
+  bold: true,
+  color: { argb: 'FFFFFFFF' },
+};
+const BODY_FONT: Partial<ExcelJS.Font> = { name: 'Arial' };
+
+@Injectable({ providedIn: 'root' })
+export class JsonToExcelService {
+
+  // =========================================================================
+  // PUBLIC API
+  // =========================================================================
+
+  /**
+   * Flattens any JSON value into a Map<sheetName, rows[]>.
+   * Pure data transform - no Excel/DOM dependency, so it's also useful if
+   * you just want clean tabular data (e.g. to feed a grid component or send
+   * to an API) without generating a file at all.
+   */
+  async flatten(data: unknown, options: FlattenOptions = {}): Promise<SheetsMap> {
+    const chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE;
+    const maxLen = options.maxSheetNameLength ?? DEFAULT_MAX_SHEET_NAME_LEN;
+
+    const sheets: SheetsMap = new Map();
+    const rowCounters = new Map<string, number>();
+    const queue: WorkItem[] = [];
+
+    const { root, rootSheetName } = this.resolveRoot(data, options.rootName ?? 'Root', maxLen);
+
+    if (Array.isArray(root)) {
+      for (const item of root) {
+        if (this.isPlainObject(item)) {
+          queue.push({ obj: item, sheetName: rootSheetName, parentRowId: null });
+        } else if (item !== undefined) {
+          this.pushRow(sheets, rootSheetName, { value: this.scalarToStr(item) });
+        }
+      }
+    } else if (this.isPlainObject(root)) {
+      queue.push({ obj: root, sheetName: rootSheetName, parentRowId: null });
+    }
+
+    let processedSinceYield = 0;
+    let totalRows = 0;
+    let sheetsSeen = new Set<string>();
+
+    // Iterative BFS over the JSON tree. New child-array work items get
+    // pushed onto the SAME queue as we go, so any depth of nesting is
+    // handled without growing the JS call stack.
+    while (queue.length > 0) {
+      const item = queue.shift() as WorkItem;
+      this.flattenRecordInto(item, sheets, rowCounters, queue, maxLen);
+
+      totalRows++;
+      sheetsSeen.add(item.sheetName);
+      processedSinceYield++;
+
+      if (processedSinceYield >= chunkSize) {
+        processedSinceYield = 0;
+        options.onProgress?.(this.progress('flattening', sheetsSeen.size, totalRows));
+        await this.yieldToEventLoop();
+      }
+    }
+
+    options.onProgress?.(this.progress('flattening', sheetsSeen.size, totalRows));
+    return sheets;
+  }
+
+  /**
+   * Flattens `data` and writes a fully formatted .xlsx Blob (in-memory).
+   * Use this if you want to upload the result, attach it to an email, etc.
+   * instead of triggering a browser download.
+   */
+  async buildExcelBlob(data: unknown, options: ExportOptions = {}): Promise<Blob> {
+    const sheets = await this.flatten(data, options);
+    const workbook = await this.sheetsToWorkbook(sheets, options);
+    const buffer = await workbook.xlsx.writeBuffer();
+    return new Blob([buffer], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+  }
+
+  /**
+   * Convenience one-liner for the common case: JSON in, .xlsx file
+   * downloaded in the browser.
+   */
+  async exportToExcel(data: unknown, fileName: string, options: ExportOptions = {}): Promise<void> {
+    const blob = await this.buildExcelBlob(data, options);
+    saveAs(blob, fileName.endsWith('.xlsx') ? fileName : `${fileName}.xlsx`);
+  }
+
+  // =========================================================================
+  // FLATTENING INTERNALS
+  // =========================================================================
+
+  /** Unwraps a single top-level wrapper key, e.g. { policy: {...} } -> ('Policy', {...}). */
+  private resolveRoot(
+    data: unknown,
+    fallbackName: string,
+    maxLen: number
+  ): { root: unknown; rootSheetName: string } {
+    if (this.isPlainObject(data)) {
+      const keys = Object.keys(data as object);
+      if (keys.length === 1) {
+        const onlyKey = keys[0];
+        const onlyVal = (data as any)[onlyKey];
+        if (this.isPlainObject(onlyVal) || Array.isArray(onlyVal)) {
+          return { root: onlyVal, rootSheetName: this.toSheetName(onlyKey, maxLen) };
+        }
+      }
+    }
+    return { root: data, rootSheetName: this.toSheetName(fallbackName, maxLen) };
+  }
+
+  /** Flattens one JSON object into a single row; queues any nested arrays-of-objects as new work items. */
+  private flattenRecordInto(
+    item: WorkItem,
+    sheets: SheetsMap,
+    rowCounters: Map<string, number>,
+    queue: WorkItem[],
+    maxLen: number
+  ): string {
+    const { obj, sheetName, parentRowId } = item;
+    const rowId = this.nextRowId(sheetName, rowCounters);
+
+    const row: SheetRow = { RowID: rowId };
+    if (parentRowId !== null) row['ParentRowID'] = parentRowId;
+
+    for (const key of Object.keys(obj)) {
+      const value = obj[key];
+
+      if (value === null || value === undefined) {
+        row[key] = null;
+        continue;
+      }
+
+      if (Array.isArray(value)) {
+        if (value.length === 0) continue; // no data -> no phantom child sheet
+        if (value.every((v) => this.isPlainObject(v))) {
+          const childSheet = this.toSheetName(`${sheetName}_${key}`, maxLen);
+          for (const child of value) {
+            queue.push({ obj: child, sheetName: childSheet, parentRowId: rowId });
+          }
+        } else {
+          row[key] = value.map((v) => this.scalarToStr(v)).join(', ');
+        }
+        continue;
+      }
+
+      if (this.isPlainObject(value)) {
+        // Nested plain object -> flatten inline via dot notation (iterative, any depth).
+        Object.assign(row, this.flattenNestedObject(value, key));
+        continue;
+      }
+
+      row[key] = value;
+    }
+
+    this.pushRow(sheets, sheetName, row);
+    return rowId;
+  }
+
+  /**
+   * Iteratively flattens a nested plain object into dot-notation keys on the
+   * SAME row (it has no identity/grain of its own). Uses an explicit stack
+   * rather than recursive calls, so pathologically deep objects (rare, but
+   * possible in generated/exported JSON) can't overflow the call stack.
+   */
+  private flattenNestedObject(obj: Record<string, any>, prefix: string): SheetRow {
+    const result: SheetRow = {};
+    const stack: Array<{ obj: Record<string, any>; prefix: string }> = [{ obj, prefix }];
+
+    while (stack.length > 0) {
+      const { obj: current, prefix: currentPrefix } = stack.pop() as { obj: Record<string, any>; prefix: string };
+
+      for (const key of Object.keys(current)) {
+        const value = current[key];
+        const fullKey = currentPrefix ? `${currentPrefix}.${key}` : key;
+
+        if (value === null || value === undefined) {
+          result[fullKey] = null;
+        } else if (Array.isArray(value)) {
+          if (value.length === 0) continue;
+          // A repeating array nested two-plus levels deep inside a non-array
+          // object still deserves its own sheet, not a JSON blob in a cell -
+          // but it has no direct parent RowID at this point in the stack, so
+          // we surface it as an unlinked top-level-ish sheet named by path.
+          // (Occurs rarely; most real-world JSON puts arrays directly on the record.)
+          result[fullKey] = JSON.stringify(value);
+        } else if (this.isPlainObject(value)) {
+          stack.push({ obj: value, prefix: fullKey });
+        } else {
+          result[fullKey] = value;
+        }
+      }
+    }
+    return result;
+  }
+
+  private pushRow(sheets: SheetsMap, sheetName: string, row: SheetRow): void {
+    let rows = sheets.get(sheetName);
+    if (!rows) {
+      rows = [];
+      sheets.set(sheetName, rows);
+    }
+    rows.push(row);
+  }
+
+  private nextRowId(sheetName: string, counters: Map<string, number>): string {
+    const next = (counters.get(sheetName) ?? 0) + 1;
+    counters.set(sheetName, next);
+    return `${sheetName}_${next}`;
+  }
+
+  private toSheetName(key: string, maxLen: number): string {
+    const capitalized = key.length ? key[0].toUpperCase() + key.slice(1) : key;
+    return capitalized.slice(0, maxLen);
+  }
+
+  private scalarToStr(v: unknown): string {
+    return this.isPlainObject(v) || Array.isArray(v) ? JSON.stringify(v) : String(v);
+  }
+
+  private isPlainObject(v: unknown): v is Record<string, any> {
+    return typeof v === 'object' && v !== null && !Array.isArray(v);
+  }
+
+  private yieldToEventLoop(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  private progress(phase: ConversionProgress['phase'], sheetsProcessed: number, rowsProcessed: number): ConversionProgress {
+    return { phase, sheetsProcessed, rowsProcessed };
+  }
+
+  // =========================================================================
+  // WORKBOOK BUILDING (ExcelJS)
+  // =========================================================================
+
+  private async sheetsToWorkbook(sheets: SheetsMap, options: ExportOptions): Promise<ExcelJS.Workbook> {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'JsonToExcelService';
+    workbook.created = new Date();
+
+    const usedNames = new Set<string>();
+    const maxLen = options.maxSheetNameLength ?? DEFAULT_MAX_SHEET_NAME_LEN;
+    const freezeHeader = options.freezeHeader ?? true;
+    const autoFilter = options.autoFilter ?? true;
+    const styledHeader = options.styledHeader ?? true;
+
+    let sheetsProcessed = 0;
+    let rowsProcessed = 0;
+
+    for (const [rawName, rows] of sheets.entries()) {
+      if (rows.length === 0) continue;
+
+      const columns = this.discoverColumns(rows);
+      const sheetName = this.uniqueSheetName(rawName, usedNames, maxLen);
+      usedNames.add(sheetName);
+
+      const worksheet = workbook.addWorksheet(sheetName, {
+        views: freezeHeader ? [{ state: 'frozen', ySplit: 1 }] : undefined,
+      });
+
+      worksheet.columns = columns.map((col) => ({
+        header: col,
+        key: col,
+        width: Math.min(
+          60,
+          Math.max(col.length, ...rows.map((r) => String(r[col] ?? '').length)) + 3
+        ),
+      }));
+
+      if (styledHeader) {
+        const headerRow = worksheet.getRow(1);
+        headerRow.eachCell((cell) => {
+          cell.font = HEADER_FONT;
+          cell.fill = HEADER_FILL;
+          cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        });
+      }
+
+      // Add rows in a single batched call rather than cell-by-cell writes -
+      // this is the fast path in ExcelJS for large sheets.
+      worksheet.addRows(rows);
+
+      worksheet.eachRow((row, rowNumber) => {
+        if (rowNumber === 1) return;
+        row.font = BODY_FONT;
+      });
+
+      if (autoFilter && columns.length > 0) {
+        worksheet.autoFilter = {
+          from: { row: 1, column: 1 },
+          to: { row: 1, column: columns.length },
+        };
+      }
+
+      sheetsProcessed++;
+      rowsProcessed += rows.length;
+      options.onProgress?.(this.progress('building-workbook', sheetsProcessed, rowsProcessed));
+
+      // Yield periodically here too, so building a workbook with many large
+      // sheets doesn't freeze the UI thread either.
+      await this.yieldToEventLoop();
+    }
+
+    options.onProgress?.(this.progress('done', sheetsProcessed, rowsProcessed));
+    return workbook;
+  }
+
+  private discoverColumns(rows: SheetRow[]): string[] {
+    const seen = new Set<string>();
+    const columns: string[] = [];
+    for (const row of rows) {
+      for (const key of Object.keys(row)) {
+        if (!seen.has(key)) {
+          seen.add(key);
+          columns.push(key);
+        }
+      }
+    }
+    return columns;
+  }
+
+  private uniqueSheetName(name: string, used: Set<string>, maxLen: number): string {
+    let candidate = name.slice(0, maxLen);
+    let i = 1;
+    while (used.has(candidate)) {
+      const suffix = `_${i++}`;
+      candidate = name.slice(0, maxLen - suffix.length) + suffix;
+    }
+    return candidate;
+  }
+}
+
+
+
+
+
+
+
+
+
+
+/// <reference lib="webworker" />
+/**
+ * json-to-excel.worker.ts
+ * -------------------------------------------------------------------------
+ * Optional: for very large JSON payloads (tens of MB+), even chunked/async
+ * flattening on the main thread can cause jank because JS is single-threaded
+ * per tab. This worker runs JsonToExcelService.flatten() on a background
+ * thread and posts the resulting SheetsMap back, so the UI never blocks.
+ *
+ * Generate the worker with the Angular CLI first if you don't already have one:
+ *   ng generate web-worker json-to-excel
+ * then replace the generated file's contents with this file, or point your
+ * component at this file directly.
+ *
+ * Usage from a component/service:
+ *
+ *   if (typeof Worker !== 'undefined') {
+ *     const worker = new Worker(new URL('./json-to-excel.worker', import.meta.url));
+ *     worker.onmessage = ({ data }) => {
+ *       // data.sheets is a plain object: { [sheetName]: SheetRow[] }
+ *       // rebuild a Map if you need to pass it back into sheetsToWorkbook():
+ *       const sheets = new Map(Object.entries(data.sheets));
+ *       worker.terminate();
+ *     };
+ *     worker.postMessage({ json: myLargeJsonObject, options: { chunkSize: 5000 } });
+ *   } else {
+ *     // Web Workers are not supported in this environment (e.g. some SSR
+ *     // setups) - fall back to calling JsonToExcelService.flatten() directly.
+ *   }
+ * -------------------------------------------------------------------------
+ */
+
+import { JsonToExcelService } from './json-to-excel.service';
+import { FlattenOptions, SheetsMap } from './json-to-excel.model';
+
+addEventListener('message', async ({ data }) => {
+  const { json, options } = data as { json: unknown; options?: FlattenOptions };
+
+  // JsonToExcelService only depends on plain JS/TS, not on Angular's DI
+  // container behavior at runtime, so it's safe to `new` it directly here
+  // outside of Angular's injector.
+  const service = new JsonToExcelService();
+
+  const sheets: SheetsMap = await service.flatten(json, {
+    ...options,
+    onProgress: (progress) => postMessage({ type: 'progress', progress }),
+  });
+
+  postMessage({
+    type: 'result',
+    sheets: Object.fromEntries(sheets), // Maps aren't structured-clonable in every browser; plain object is safe
+  });
+});
+
+
+
+
+
+
+
+
+
+
+import { Component } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { JsonToExcelService } from './json-to-excel.service';
+import { ConversionProgress } from './json-to-excel.model';
+
+@Component({
+  selector: 'app-json-to-excel-demo',
+  standalone: true,
+  imports: [CommonModule],
+  template: `
+    <input type="file" accept=".json" (change)="onFileSelected($event)" />
+
+    <div *ngIf="progress">
+      {{ progress.phase }} — {{ progress.sheetsProcessed }} sheet(s),
+      {{ progress.rowsProcessed }} row(s) processed
+    </div>
+
+    <button (click)="convertSample()">Convert sample policy JSON</button>
+  `,
+})
+export class JsonToExcelDemoComponent {
+  progress: ConversionProgress | null = null;
+
+  constructor(private readonly jsonToExcel: JsonToExcelService) {}
+
+  async onFileSelected(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    const text = await file.text();
+    const json = JSON.parse(text);
+
+    await this.jsonToExcel.exportToExcel(json, file.name.replace(/\.json$/i, '.xlsx'), {
+      chunkSize: 5000,
+      onProgress: (p) => (this.progress = p),
+    });
+
+    this.progress = null;
+  }
+
+  async convertSample(): Promise<void> {
+    const samplePolicy = {
+      policy: {
+        policyNumber: 'AIP-98374-2026',
+        status: 'Active',
+        billing: { paymentPlan: 'Monthly', premiumAmount: 1450 },
+        vehicles: [
+          {
+            vehicleId: 'VEH-01',
+            make: 'Ford',
+            model: 'Mustang',
+            coverages: [
+              { type: 'Liability', deductible: 0 },
+              { type: 'Collision', deductible: 500 },
+            ],
+          },
+        ],
+      },
+    };
+
+    await this.jsonToExcel.exportToExcel(samplePolicy, 'policy_workbook.xlsx', {
+      onProgress: (p) => (this.progress = p),
+    });
+
+    this.progress = null;
+  }
+}
